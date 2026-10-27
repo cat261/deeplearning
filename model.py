@@ -392,3 +392,93 @@ plt.imshow(img[0,:,:,0], cmap="gray")
 plt.title("Generated Image: Dog")
 plt.axis("off")
 plt.show()
+
+
+#4 new
+import numpy as np
+import tensorflow as tf
+from pathlib import Path
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, LSTM, Embedding, Add
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+# 1. Load images from 5 class folders
+DATASET = Path(r"D:\ImageNet")
+images, captions = [], []
+
+for folder in sorted(DATASET.iterdir())[:5]:
+    if folder.is_dir():
+        for p in list(folder.glob("*.jpg"))[:10]:
+            images.append(p)
+            captions.append(
+                "<start> a photo of " + folder.name.replace("_", " ") + " <end>"
+            )
+
+# 2. CNN encoder: extract image features
+cnn = ResNet50(weights="imagenet", include_top=False, pooling="avg")
+X = []
+for p in images:
+    img = image.load_img(p, target_size=(224, 224))
+    arr = image.img_to_array(img)
+    arr = preprocess_input(np.expand_dims(arr, 0))
+    X.append(cnn.predict(arr, verbose=0)[0])
+X = np.array(X)
+
+# 3. Tokenize captions and create vocabulary
+tok = Tokenizer(filters="", lower=True)
+tok.fit_on_texts(captions)
+seq = tok.texts_to_sequences(captions)
+seq = pad_sequences(seq, padding="post")
+vocab = len(tok.word_index) + 1
+
+# 4. Prepare next-word training samples
+img_features, inputs, targets = [], [], []
+for i, s in enumerate(seq):
+    for j in range(1, len(s)):
+        if s[j] == 0:
+            continue
+        img_features.append(X[i])
+        inputs.append(s[:j])
+        targets.append(s[j])
+
+inputs = pad_sequences(inputs, maxlen=seq.shape[1]-1, padding="post")
+targets = tf.keras.utils.to_categorical(targets, num_classes=vocab)
+img_features = np.array(img_features)
+
+# 5. CNN-LSTM caption model
+image_input = Input(shape=(2048,))
+word_input = Input(shape=(inputs.shape[1],))
+a = Dense(128, activation="relu")(image_input)
+a = tf.keras.layers.RepeatVector(inputs.shape[1])(a)
+b = Embedding(vocab, 128, mask_zero=True)(word_input)
+x = Add()([a, b])
+x = LSTM(128)(x)
+out = Dense(vocab, activation="softmax")(x)
+
+model = Model([image_input, word_input], out)
+model.compile(optimizer="adam", loss="categorical_crossentropy")
+
+# 6. Train the LSTM decoder
+model.fit([img_features, inputs], targets, epochs=10, batch_size=16)
+
+# 7. Generate a caption for an image
+def caption_image(path):
+    img = image.load_img(path, target_size=(224, 224))
+    arr = preprocess_input(np.expand_dims(image.img_to_array(img), 0))
+    feat = cnn.predict(arr, verbose=0)
+
+    sentence = "<start>"
+    for _ in range(12):
+        s = tok.texts_to_sequences([sentence])[0]
+        s = pad_sequences([s], maxlen=inputs.shape[1], padding="post")
+        pred = model.predict([feat, s], verbose=0)[0]
+        word = tok.index_word.get(np.argmax(pred), "")
+        if not word or word == "<end>":
+            break
+        sentence += " " + word
+    return sentence.replace("<start>", "").strip()
+
+print("Generated caption:", caption_image(images[0]))
